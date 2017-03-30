@@ -1,0 +1,1005 @@
+Virtualization Detection
+
+[b][size=12pt]Introduction[/size][/b]
+
+Often times you'll find you want to avoid having your program run inside a virtual machine. In order to avoid detection, rather than implementing methods to fail when being run inside a specific software analysis tool, you might prefer to fail/stop altogether when being run inside a virtual machine. In this tutorial I'll be showing you a few methods in C that I used to detect virtual machines.
+
+This tutorial includes section of VMWare specific code as defined here:
+http://kb.vmware.com/selfservice/microsites/search.do?language=en_US&cmd=displayKC&externalId=1009458
+
+The full VMWare specified program can be found at the bottom of the tutorial for your convenience.
+
+VMWare specific code will appear as such
+
+[b]VMWare[/b]
+
+[code]
+************
+*** code ***
+************
+[/code]
+
+Many times throughout the code, you'll see non-quoted strings that look like ' VIRTUALIZATION_QEMU ' .
+These strings are to be defined globally in your file by including this code block:
+
+[code]
+enum {
+        VIRTUALIZATION_NONE = 0,
+
+        VIRTUALIZATION_VM_FIRST,
+        VIRTUALIZATION_KVM = VIRTUALIZATION_VM_FIRST,
+        VIRTUALIZATION_QEMU,
+        VIRTUALIZATION_BOCHS,
+        VIRTUALIZATION_XEN,
+        VIRTUALIZATION_UML,
+        VIRTUALIZATION_VMWARE,
+        VIRTUALIZATION_ORACLE,
+        VIRTUALIZATION_MICROSOFT,
+        VIRTUALIZATION_ZVM,
+        VIRTUALIZATION_PARALLELS,
+        VIRTUALIZATION_VM_OTHER,
+        VIRTUALIZATION_VM_LAST = VIRTUALIZATION_VM_OTHER,
+        _VIRTUALIZATION_MAX,
+        _VIRTUALIZATION_INVALID = -1
+};
+[/code]
+
+Another function you will see throughout the code is ELEMENTSOF(x). This functions is a macro and is defined as such:
+
+[code]
+#define ELEMENTSOF(x)                                                    \
+        __extension__ (__builtin_choose_expr(                            \
+                !__builtin_types_compatible_p(typeof(x), typeof(&*(x))), \
+                sizeof(x)/sizeof((x)[0]),                                \
+                (void)0))
+[/code]
+
+The full, complete code for Virtual Machine/Hypervisor Detection can be found below. At the bottom of that code, the full VMWare specific code completed can be found.
+
+
+[b][size=12pt]Predefined Processor Macros[/size][/b]
+
+What are they? They are lines used to wrap processor specific code. This isn't too vital in this tutorial as explained below,
+but it's nice to know how to use them. 
+Why do we use them? Well, you can't use rxx registers on 32bit systems. More importantly, in this particular case, our opcode
+only writes to eax/ebx/ecx/edx.
+
+How to use these macros:
+
+[code]
+#include <stdio.h>
+
+int main(){
+#if defined (__x86_64__) || defined(_M_X64)
+    printf("64 BIT!\n");
+#elif defined (__i386) || defined(_M_IX86)
+    printf("32 BIT!\n");
+#endif
+}
+[/code]
+
+On a 32bit system, it will output 32bit, and 64bit on 64bit. This is mainly used when creating little bits of code that need to be cross-compatible.
+
+Keep in mind: ' #if defined MACRO ' is precisely equivalent to ' #ifdef MACRO ' , so if you see both used, know that they are interchangeable.
+
+A solid list can be found here:
+http://sourceforge.net/p/predef/wiki/Architectures/
+
+A more comprehensive list that details recommended macros which I prefer can be found here:
+http://nadeausoftware.com/articles/2012/01/c_c_tip_how_use_compiler_predefined_macros_detect_operating_system
+
+More about defining macros and their syntax can be found here:
+https://gcc.gnu.org/onlinedocs/cpp/Defined.html
+
+
+[size=12pt][b]CPUID[/b][/size]
+
+The reason this tutorial started with a little bit of assembly jargon is entirely for this section. The CPUID opcode is a processor supplementary instruction (its name derived from CPU IDentification) for the x86 architecture allowing software to discover details of the processor. An important piece of information in regards to the CPUID opcode is that the value in the EAX register, and in some cases the ECX register, which specifies what information to return. Thais means we must ensure we return either EAX or ECX.
+
+A full overview can be found here: https://en.wikipedia.org/wiki/CPUID
+
+You may be asking, what's CPUID used for in determining if my program is being run in a virtual environment?
+
+Well, we're going to be using CPUID to get the vendor ID. As noted on the wikipedia page, EAX=0: Get vendor ID  and  EAX=1: Processor Info and Feature Bits . These will be important in determining if a hypervisor is present, and what type of hypervisor is present.
+
+The following are known ID strings from virtual machines:
+
+"KVMKVMKVM" – KVM
+"Microsoft Hv" – Microsoft Hyper-V or Windows Virtual PC
+" lrpepyh vr" – Parallels (it possibly should be "prl hyperv ", but it is encoded as " lrpepyh vr")
+"VMwareVMware" – VMware
+"XenVMMXenVMM" – Xen HVM
+
+This means that by using the CPUID opcode and setting EAX to 0 or 1, we can return information related to virtualized environments.
+
+Here's the code for checking whether or not cpuid is set.
+
+[code]
+int cpuid_check(){
+
+        /* CPUID is an x86 specific interface. */
+	#if defined(__i386__) || defined(__x86_64__)
+
+        static const struct {
+                const char *cpuid;
+                int id;
+        } cpuid_vendor_table[] = {
+                { "XenVMMXenVMM", VIRTUALIZATION_XEN       },
+                { "KVMKVMKVM",    VIRTUALIZATION_KVM       },
+                { "VMwareVMware", VIRTUALIZATION_VMWARE    },
+                { "Microsoft Hv", VIRTUALIZATION_MICROSOFT },
+        };
+
+        uint32_t eax, ecx;
+        bool hypervisor;	//int works as well here
+
+	#if defined (__i386__)
+	#define REG_a "eax"
+	#define REG_b "ebx"
+	#elif defined (__amd64__)
+	#define REG_a "rax"
+	#define REG_b "rbx"
+	#endif
+
+        eax = 1;
+        __asm__ __volatile__ (
+                "  push %%"REG_b"         \n\t"
+                "  cpuid                  \n\t"
+                "  pop %%"REG_b"          \n\t"
+                : "=a" (eax), "=c" (ecx)
+                : "0" (eax)
+        );
+
+        hypervisor = !!(ecx & 0x80000000U);
+
+        if (hypervisor) {
+                union {
+                        uint32_t sig32[3];
+                        char text[13];
+                } sig = {};
+                unsigned j;
+
+                /* There is a hypervisor, see what it is */
+                eax = 0x40000000U;
+                __asm__ __volatile__ (
+                        "  push %%"REG_b"         \n\t"
+                        "  cpuid                  \n\t"
+                        "  mov %%ebx, %1          \n\t"
+                        "  pop %%"REG_b"          \n\t"
+                        : "=a" (eax), "=r" (sig.sig32[0]), 
+			  "=c" (sig.sig32[1]), "=d" (sig.sig32[2])
+                        : "0" (eax)
+                );
+                for (j = 0; j < ELEMENTSOF(cpuid_vendor_table); j++){
+                        if (strcmp(sig.text, cpuid_vendor_table[j].cpuid) == 0){
+				printf("No running in ");
+				if (strcmp("XenVMMXenVMM", cpuid_vendor_table[j].cpuid) == 0){
+					printf("Xen Hypervisor allowed!\n");
+				}
+				else if (strcmp("KVMKVMKVM", cpuid_vendor_table[j].cpuid) == 0){
+					printf("KVM allowed!\n");
+				}
+				else if (strcmp("VMwareVMware", cpuid_vendor_table[j].cpuid) == 0){
+					printf("VMWare allowed!\n");
+				}
+				else if (strcmp("Microsoft Hv", cpuid_vendor_table[j].cpuid) == 0){
+					printf("Microsoft Hypervisor allowed!\n");
+				}
+                                return 1;
+			}
+		}
+                return 1;
+        }
+#endif
+
+        return 0;
+}
+[/code]
+
+It looks like a lot to take in at first, so let's break it down.
+
+[code]
+/* CPUID is an x86 specific interface. */
+#if defined(__i386__) || defined(__x86_64__)
+...
+#endif
+[/code]
+
+This bit is pretty self-explanatory but vital nonetheless. The pre-defined processor macro is because the CPUID assembly opcode only works on x86 (32bit and 64bit) architectures. Every time you have an ifdef statement, you need to end the wrap with an endif.
+
+[code]
+static const struct {
+        const char *cpuid;
+        int id;
+} cpuid_vendor_table[] = {
+        { "XenVMMXenVMM", VIRTUALIZATION_XEN       },
+        { "KVMKVMKVM",    VIRTUALIZATION_KVM       },
+        { "VMwareVMware", VIRTUALIZATION_VMWARE    },
+        { "Microsoft Hv", VIRTUALIZATION_MICROSOFT },
+};
+[/code]
+
+This part is used to enumerate which hypervisor is running. Not really necessary but I left it in to show you how it could be used. Refer to this line:
+
+[code]
+if (strcmp("XenVMMXenVMM", cpuid_vendor_table[j].cpuid) == 0)
+[/code]
+
+The lines following it show the same process if you're looking for multiple different virtualization environments. Then again, you could also just pop up an or ( || ) statement between two string compares.
+
+[code]
+uint32_t eax, ecx;
+bool hypervisor;	//int works as well here
+
+#if defined (__i386__)
+#define REG_a "eax"
+#define REG_b "ebx"
+#elif defined (__amd64__)
+#define REG_a "rax"
+#define REG_b "rbx"
+#endif
+
+eax = 1;
+__asm__ __volatile__ (
+	"  push %%"REG_b"         \n\t"
+	"  cpuid                  \n\t"
+	"  pop %%"REG_b"          \n\t"
+	: "=a" (eax), "=c" (ecx)
+	: "0" (eax)
+);
+
+hypervisor = !!(ecx & 0x80000000U);
+[/code]
+
+This is the main chunk of code and the last bit that is actually necessary for determining the presence of a hypervisor. The first bit is just a simple declaration of eax and ecx with a boolean or int hypervisor after that. Then we see the use of predefined macros aagin. This time it's to change whether or not to use x86 or x86_64, if 64 bit use rxx, if 32 bit use exx. Following that, we're going to set eax to 1. Recall that checking if the 31st bit of ecx is set after setting eax to 1 will return false if not set and true if set. It is always 0 on a real CPU, but also with some hypervisors. 
+
+Note: The following are interchangeable.
+
+[code]
+eax = 1;
+__asm__ __volatile__ (
+	"  push %%"REG_b"         \n\t"
+	"  cpuid                  \n\t"
+	"  pop %%"REG_b"          \n\t"
+	: "=a" (eax), "=c" (ecx)
+	: "0" (eax)
+);
+[/code]
+
+[code]
+void cpuid(int a, unsigned int *eax, unsigned int *ebx, unsigned int *ecx, unsigned int *edx){
+
+	__asm__("cpuid" :"=a"(*eax), "=b"(*ebx), "=c"(*ecx), "=d"(*edx) :"0"(a));
+
+}
+[/code]
+
+I wrote the bottom version, so I'm partial to that in saying it's more readable and makes more sense to me, but if the top one helps you more then by all means, use it.
+
+The line ' hypervisor = !!(ecx & 0x80000000U); ' may confuse some. I personally had never seen a double exclamation mark in syntax before, so I felt it was best to look up. Well it turns out to be quite obvious. It's just a double unary NOT. If the return value of the function is greater (or less) than 0, double NOT will produce 1. If it is 0 then double NOTing it will produce 0. So what this does is say, is the 31st bit present. If it is, hypervisor will be set to 1. If it isn't, hypervisor will be set to 0. An interesting line to output this would be:
+
+[code]
+fputs(hypervisor ? "true\n" : "false\n", stdout);
+[/code]
+
+This of course can be substituted with many other variations. To test the output just print the decimal version of hypervisor.
+
+[code]
+if (hypervisor) {
+                union {
+                        uint32_t sig32[3];
+                        char text[13];
+                } sig = {};
+                unsigned j;
+
+                /* There is a hypervisor, see what it is */
+                eax = 0x40000000U;
+                __asm__ __volatile__ (
+                        "  push %%"REG_b"         \n\t"
+                        "  cpuid                  \n\t"
+                        "  mov %%ebx, %1          \n\t"
+                        "  pop %%"REG_b"          \n\t"
+                        : "=a" (eax), "=r" (sig.sig32[0]), 
+			  "=c" (sig.sig32[1]), "=d" (sig.sig32[2])
+                        : "0" (eax)
+                );
+[/code]
+
+You may have noticed the starting syntax of the if statement. The starting if syntax is explained further here:  https://www.le.ac.uk/users/rjm1/cotter/page_37.htm
+
+In short, in C, true is represented by any numeric value not equal to 0 and false is represented by 0.
+This allows you to write if(a != 0) just as if(a).
+
+The next bit is a union data type. I'm going to be honest in saying that unions are weird as hell. They can be affected by endian-ness and you're only really supposed to use one element. If you want to learn more about them, look at tutorialpoint or stackoverflow examples. Think of a union as an awkward struct if you don't want to be bothered with the specifics. The unsigned j comes later and the union is used for pulling the "name" from the cpuid vendor table. The name is stored in ebx, ecx, and edx, at leaf 0x40000000U. The leaf is Intel's terminology which basically means the value of eax, so if you go around and people are talking about leaves of a cpu, just know they mean the values of eax, but I digress. After going through the cpuid process at leaf 0x40000000U, we can return and compare the b, c, and d registers to get the name of the vendor. For VMWare the values would look like this:
+
+ebx = VMwa
+ecx = reVM
+edx = ware
+
+[code]
+for (j = 0; j < ELEMENTSOF(cpuid_vendor_table); j++){
+	if (strcmp(sig.text, cpuid_vendor_table[j].cpuid) == 0){
+		printf("No running in ");
+			if (strcmp("XenVMMXenVMM", cpuid_vendor_table[j].cpuid) == 0){
+				printf("Xen Hypervisor allowed!\n");
+			}
+			else if (strcmp("KVMKVMKVM", cpuid_vendor_table[j].cpuid) == 0){
+				printf("KVM allowed!\n");
+			}
+			else if (strcmp("VMwareVMware", cpuid_vendor_table[j].cpuid) == 0){
+				printf("VMWare allowed!\n");
+			}
+			else if (strcmp("Microsoft Hv", cpuid_vendor_table[j].cpuid) == 0){
+				printf("Microsoft Hypervisor allowed!\n");
+			}
+                 return 1;
+	}
+}
+return 1;
+}
+#endif
+return 0;
+}
+[/code]
+
+This last bit should be self explanatory. I added in print statements so you could get a feel for what is being compared and returned. sig.text holds the full string of ebx, ecx, and edx combined. For example it would be "VMwareVMware". If "VMwareVMware" matches cpuid_vendor_table[j] where j is 0 through 3, then compare again which string it is to get a definitive answer to what hypervisor is running. Return 1 after that because we're positive for a fact that there is a hypervisor running.
+Heck, even return 1 if it doesn't match after stepping through the whole table. If the hypervisor present bit was set, it was set because a hypervisor is present!
+
+[b]VMWare[/b]
+
+The VMWare specific version of everything above can be simplified into the following.
+
+[code]
+void cpuid(int a, unsigned int *eax, unsigned int *ebx, unsigned int *ecx, unsigned int *edx){
+
+	__asm__("cpuid" :"=a"(*eax), "=b"(*ebx), "=c"(*ecx), "=d"(*edx) :"0"(a));
+
+}
+
+int cpuid_check(){
+
+        unsigned int eax, ebx, ecx, edx;
+        char hyper_vendor_id[13];
+
+	cpuid(0x1, &eax, &ebx, &ecx, &edx);
+	if ((ecx) & (1<<(31))){
+		cpuid(0x40000000, &eax, &ebx, &ecx, &edx);
+                memcpy(hyper_vendor_id + 0, &ebx, 4);
+                memcpy(hyper_vendor_id + 4, &ecx, 4);
+                memcpy(hyper_vendor_id + 8, &edx, 4);
+                hyper_vendor_id[12] = '\0';
+                if (!strcmp(hyper_vendor_id, "VMwareVMware"))
+                        return 1;
+        }
+
+	return 0;
+
+}
+[/code]
+
+A brief explanation of the code:
+
+The cpuid function is the same as explained above. This time we're declaring the 4 registers, and starting the cpuid function at eax = 0x1 which is just 1 written in hex. If the bit 31 of ecx is set, we know for a fact a hypervisor is running, but to make sure it's VMWare, check the vendor id. Pull the vendor id by checking the cpuid at leaf 0x40000000. Pull ebx, ecx, and edx, and check if the string from those registers combined is equivalent to "VMwareVMware".
+
+
+[size=12pt][b]DMI Strings[/b][/size]
+
+Here's the block of code I used to check for dmi strings. This is mainly from systemd with a few minor changes to dmi_check to make sure everything else worked properly and I completely rewrote read_one_line_file.
+
+[code]
+int read_one_line_file(const char *fn, char **line) {
+	FILE *read;
+	read = fopen(fn, "r");
+	if ( read == NULL ) { return 0; }
+	fseeko(read, 0, SEEK_END);
+	if ( ftello(read) == 0 ){ printf("Blank file!\n"); return 0; }
+	rewind(read);
+	fscanf(read, "%ms", line);
+	fclose(read);
+	return 1;
+}
+
+
+int dmi_check(){
+
+	#if defined(__i386__) || defined(__x86_64__) || defined(__arm__) || defined(__aarch64__)
+
+        unsigned i;
+
+        static const char *const dmi_vendors[] = {
+                "/sys/class/dmi/id/product_name",
+                "/sys/class/dmi/id/sys_vendor",
+                "/sys/class/dmi/id/board_vendor",
+                "/sys/class/dmi/id/bios_vendor"
+        };
+
+        static const struct {
+                const char *vendor;
+                int id;
+        } dmi_vendor_table[] = {
+                { "KVM",           VIRTUALIZATION_KVM       },
+                { "QEMU",          VIRTUALIZATION_QEMU      },
+                { "VMware",        VIRTUALIZATION_VMWARE    },
+                { "VMW",           VIRTUALIZATION_VMWARE    },
+                { "innotek GmbH",  VIRTUALIZATION_ORACLE    },
+		{ "VirtualBox",    VIRTUALIZATION_ORACLE    },
+                { "Xen",           VIRTUALIZATION_XEN       },
+                { "Bochs",         VIRTUALIZATION_BOCHS     },
+                { "Parallels",     VIRTUALIZATION_PARALLELS },
+        };
+
+        for (i = 0; i < ELEMENTSOF(dmi_vendors); i++) {
+                char *s = NULL;
+                unsigned j;
+
+                read_one_line_file(dmi_vendors[i], &s);
+
+                for (j = 0; j < ELEMENTSOF(dmi_vendor_table); j++){
+                        if ( (strcmp(s, dmi_vendor_table[j].vendor) == 0) )
+                                return 1;
+		}
+        }
+
+	return 0;
+#endif
+
+}
+[/code]
+
+dmi_check uses the file paths shown in the dmi_vendors array to check if the strings listed in dmi_vendor_table are present. If they are present, then the program is being run in a virtual machine. That's pretty much the only thing to explain about this one. It's extremely helpful because certain hypervisors like VirtualBox don't set bit 31 of ecx so you can't use that to determine if the program is being run in a VM or not, but dmi strings to the rescue.
+
+The main line of this section is 
+
+[code]
+read_one_line_file(dmi_vendors[i], &s);
+[/code]
+
+What this does is it takes each element of dmi_vendors, or in this case each path to the files we want, and it stores the first line of each of the files into the memory area *s. After that, it compares the string stored in s to all of the elements in dmi_vendor_table. If there is ever a match, return 1, else 0.
+
+[b]VMWare[/b]
+
+This uses the same concept as before, but only uses one file "/sys/class/dmi/id/sys_vendor". It then compares the string found in sys_vender to VMware, VMW, and VMw. If any of these are a match, return 1 (we're in VMWare!) or 0 (nope not in VMWare).
+
+The odd thing about this is that it is recommended by VMWare to only accept this as a valid solution if the DMI string matches AND the hypervisor port is present. More on that right now.
+
+[code]
+void GET_BIOS_SERIAL(char *string){
+	FILE *vendor;
+	vendor = fopen("/sys/class/dmi/id/sys_vendor", "r");
+	fscanf(vendor, "%s", string);
+	fclose(vendor);
+}
+
+int dmi_check(void){
+        char string[10];
+        GET_BIOS_SERIAL(string);
+
+        if (!memcmp(string, "VMware", 7) || !memcmp(string, "VMW", 3) || !memcmp(string, "VMw", 3))
+                return 1;                       // DMI contains VMware specific string.
+        else
+                return 0;
+}
+[/code]
+
+[i]Hypervisor port[/i]
+
+VMware implements an I/O port that programs can query to detect if software is running in a VMware hypervisor. This hypervisor port behaves differently depending on magic values in certain registers and modifies some registers as a side effect. VMware hypervisor is detected by performing an IN operation to port 0x5658 (the VMware hypervisor port).
+
+[code]
+#define VMWARE_HYPERVISOR_MAGIC 	0x564D5868
+#define VMWARE_HYPERVISOR_PORT  	0x5658
+#define VMWARE_PORT_CMD_GETVERSION      10
+#define UINT_MAX 			0xFFFFFFFF
+
+#define VMWARE_PORT(	eax, ebx, ecx, edx, a, b, c, d 				\
+		   ){ 								\
+			__asm__("inl %%dx" 					\
+				:"=a"(*eax), "=b"(*ebx), "=c"(*ecx), "=d"(*edx) \
+				:"0"(a), "1"(b), "2"(c), "3"(d) ); 		\
+		    }
+
+int hypervisor_port_check(){
+        unsigned int eax, ebx, ecx, edx;
+	VMWARE_PORT(&eax, &ebx, &ecx, &edx, VMWARE_HYPERVISOR_MAGIC, UINT_MAX, VMWARE_PORT_CMD_GETVERSION, VMWARE_HYPERVISOR_PORT);
+	if (ebx == VMWARE_HYPERVISOR_MAGIC) { return 1; } else { return 0; }
+}
+
+[/code]
+
+First we must define the values we need or else it would look like a complete mess and we'd have no idea what the values were when reflecting on our code. The VMWARE_PORT macro is kind of like the cpuid function I wrote earlier. It's just more inline assembly code. I rewrote/reorganized this macro to give you a bit of an easier time to read. If you were to look back at the knowledge base article I linked to at the beginning of the tutorial, you'd notice the numbers and letters are a bit off and it makes it much less clean.
+
+Basically what this function does, is it checks to see if the value returned in ebx after going through the VMWARE_PORT macro is equivalent to the vmware hypervisor magic number. Beyond that, just know how to use the code for your own needs.
+
+As I stated before, this hypervisor port check needs to be paired with the dmi_check after the cpuid check and only if both the port and dmi checks pass, can we identify what the program is running in as VMWare. 
+
+VMWare provides this for the following reasons:
+- This CPUID-based technique will not work for guest code running at CPL3 when VT/AMD-V is not available or not enabled.
+- The hypervisor present bit and hypervisor information leaf are only defined for products based on VMware hardware version 7.
+
+
+This marks the end of most of the cool, fun stuff. Stick around for more methods of detection. 
+
+I pulled these from systemd. The only important stuff I took was where to look. The changes are mine.
+
+
+[size=12pt][b]Other Hypervisors[/b][/size]
+
+[code]
+static int detect_vm_uml(void) {
+	/* Detect User-Mode Linux by reading /proc/cpuinfo */
+	FILE *cpuinfo = fopen("/proc/cpuinfo", "rb");
+	char *arg = 0;
+	size_t size = 0;
+	while(getdelim(&arg, &size, 0, cpuinfo) != -1){
+		if ( strstr(arg, "\nvendor_id\t: User Mode Linux\n") != NULL ){
+      			return 1;
+		}
+	}
+	free(arg);
+	fclose(cpuinfo);
+	return 0;
+}
+[/code]
+
+This part checks to see if it is being run in user-mode linux. All it does it open a file, /proc/cpuinfo and stringstring's (that's legitimately how I pronounce that) for the line "\nvendor_id\t: User Mode Linux\n". If that line is found, return 1 (WE'VE GOT ONE!), else return 0 (nothing to see here, move along). 
+
+[code]
+static int detect_vm_xen(void) {
+        char *domcap = NULL;
+        char *cap, *i;
+        int r = 0;
+
+        r = read_one_line_file("/proc/xen/capabilities", &domcap);
+        if (r == 0)
+                return VIRTUALIZATION_NONE;
+
+        i = domcap;
+        while ((cap = strsep(&i, ",")))
+                if (strstr(cap, "control_d"))
+                        break;
+
+        return cap ? VIRTUALIZATION_NONE : VIRTUALIZATION_XEN;
+}
+[/code]
+
+This checks for the presence of the Xen Hypervisor. It should've already been picked up by now, but if not this should do the trick. I don't have a Xen Hypervisor set up so whether this is right or not, blame the systemd guys.
+
+[code]
+/* Check me on this. I don't have a running version. */
+static int detect_vm_zvm(void) {
+	//Systemd searches for this pattern: "VM00 Control Program".
+	//As i don't have a sample zvm, I'm not sure what to do with that.
+#if defined(__s390__)
+	FILE *sysinfo = fopen("/proc/sysinfo", "rb");
+	char *arg = 0;
+	size_t size = 0;
+	while(getdelim(&arg, &size, 0, cpuinfo) != -1){
+		if ( strstr(arg, "z/VM") != NULL )
+      			return 1;
+		else
+               		return VIRTUALIZATION_KVM;
+	}
+	free(arg);
+	fclose(sysinfo);
+#else
+        return VIRTUALIZATION_NONE;
+#endif
+}
+[/code]
+
+Again, I don't have a ZVM setup, so if this is wrong, blame them. I change the way it opens and searches through the file, but the strings they search for are the same.
+
+
+[size=12pt][b]Chroot[/b][/size]
+
+[code]
+int files_same(const char *filea, const char *fileb) {
+        struct stat a, b;
+
+        assert(filea);
+        assert(fileb);
+
+        if (stat(filea, &a) < 0)
+                return -1;
+
+        if (stat(fileb, &b) < 0)
+                return -1;
+
+        return a.st_dev == b.st_dev &&
+               a.st_ino == b.st_ino;
+}
+
+int detect_chroot(void) {
+        int ret;
+
+        ret = files_same("/proc/1/root", "/");
+        if (ret < 0)
+                return 1;
+
+        return 0;
+}
+[/code]
+
+This uses file id's and what not from sys/stat.h to determine if the files are the same. I tested this over and over on a chroot and my bare metal to get it working, so if this doesn't work for everyone I'm not too sure what to say. The core concept was from the systemd set, so I'm praying I didn't mess up the universalness of it.
+
+
+[size=12pt][b]Full Code - [/b][/size]
+
+[code]
+#include <stdio.h>
+#include <stdint.h>
+#include <string.h>
+#include <stdlib.h>
+#include <sys/stat.h>
+#include <assert.h>
+
+#define ELEMENTSOF(x)                                                    \
+        __extension__ (__builtin_choose_expr(                            \
+                !__builtin_types_compatible_p(typeof(x), typeof(&*(x))), \
+                sizeof(x)/sizeof((x)[0]),                                \
+                (void)0))
+
+enum {
+        VIRTUALIZATION_NONE = 0,
+
+        VIRTUALIZATION_VM_FIRST,
+        VIRTUALIZATION_KVM = VIRTUALIZATION_VM_FIRST,
+        VIRTUALIZATION_QEMU,
+        VIRTUALIZATION_BOCHS,
+        VIRTUALIZATION_XEN,
+        VIRTUALIZATION_UML,
+        VIRTUALIZATION_VMWARE,
+        VIRTUALIZATION_ORACLE,
+        VIRTUALIZATION_MICROSOFT,
+        VIRTUALIZATION_ZVM,
+        VIRTUALIZATION_PARALLELS,
+        VIRTUALIZATION_VM_OTHER,
+        VIRTUALIZATION_VM_LAST = VIRTUALIZATION_VM_OTHER,
+        _VIRTUALIZATION_MAX,
+        _VIRTUALIZATION_INVALID = -1
+};
+
+int read_one_line_file(const char *fn, char **line) {
+	FILE *read;
+	read = fopen(fn, "r");
+	if ( read == NULL ) { return 0; }
+	fseeko(read, 0, SEEK_END);
+	if ( ftello(read) == 0 ){ printf("Blank file!\n"); return 0; }
+	rewind(read);
+	fscanf(read, "%ms", line);
+	fclose(read);
+	return 1;
+}
+
+int files_same(const char *filea, const char *fileb) {
+        struct stat a, b;
+
+        assert(filea);
+        assert(fileb);
+
+        if (stat(filea, &a) < 0)
+                return -1;
+
+        if (stat(fileb, &b) < 0)
+                return -1;
+
+        return a.st_dev == b.st_dev &&
+               a.st_ino == b.st_ino;
+}
+
+int detect_chroot(void) {
+        int ret;
+
+        ret = files_same("/proc/1/root", "/");
+        if (ret < 0)
+                return 1;
+
+        return 0;
+}
+
+/* Check me on this. I don't have a running version. */
+static int detect_vm_zvm(void) {
+	//Systemd searches for this pattern: "VM00 Control Program".
+	//As i don't have a sample zvm, I'm not sure what to do with that.
+#if defined(__s390__)
+	FILE *sysinfo = fopen("/proc/sysinfo", "rb");
+	char *arg = 0;
+	size_t size = 0;
+	while(getdelim(&arg, &size, 0, cpuinfo) != -1){
+		if ( strstr(arg, "z/VM") != NULL )
+      			return 1;
+		else
+               		return VIRTUALIZATION_KVM;
+	}
+	free(arg);
+	fclose(sysinfo);
+#else
+        return VIRTUALIZATION_NONE;
+#endif
+}
+
+static int detect_vm_uml(void) {
+	/* Detect User-Mode Linux by reading /proc/cpuinfo */
+	FILE *cpuinfo = fopen("/proc/cpuinfo", "rb");
+	char *arg = 0;
+	size_t size = 0;
+	while(getdelim(&arg, &size, 0, cpuinfo) != -1){
+		if ( strstr(arg, "\nvendor_id\t: User Mode Linux\n") != NULL ){
+      			return 1;
+		}
+	}
+	free(arg);
+	fclose(cpuinfo);
+	return 0;
+}
+
+static int detect_vm_xen(void) {
+        char *domcap = NULL;
+        char *cap, *i;
+        int r = 0;
+
+        r = read_one_line_file("/proc/xen/capabilities", &domcap);
+        if (r == 0)
+                return VIRTUALIZATION_NONE;
+
+        i = domcap;
+        while ((cap = strsep(&i, ",")))
+                if (strstr(cap, "control_d"))
+                        break;
+
+        return cap ? VIRTUALIZATION_NONE : VIRTUALIZATION_XEN;
+}
+
+int dmi_check(){
+
+	#if defined(__i386__) || defined(__x86_64__) || defined(__arm__) || defined(__aarch64__)
+
+        unsigned i;
+
+        static const char *const dmi_vendors[] = {
+                "/sys/class/dmi/id/product_name",
+                "/sys/class/dmi/id/sys_vendor",
+                "/sys/class/dmi/id/board_vendor",
+                "/sys/class/dmi/id/bios_vendor"
+        };
+
+        static const struct {
+                const char *vendor;
+                int id;
+        } dmi_vendor_table[] = {
+                { "KVM",           VIRTUALIZATION_KVM       },
+                { "QEMU",          VIRTUALIZATION_QEMU      },
+                { "VMware",        VIRTUALIZATION_VMWARE    },
+                { "VMW",           VIRTUALIZATION_VMWARE    },
+                { "innotek GmbH",  VIRTUALIZATION_ORACLE    },
+		{ "VirtualBox",    VIRTUALIZATION_ORACLE    },
+                { "Xen",           VIRTUALIZATION_XEN       },
+                { "Bochs",         VIRTUALIZATION_BOCHS     },
+                { "Parallels",     VIRTUALIZATION_PARALLELS },
+        };
+
+        for (i = 0; i < ELEMENTSOF(dmi_vendors); i++) {
+                char *s = NULL;
+                unsigned j;
+
+                read_one_line_file(dmi_vendors[i], &s);
+
+                for (j = 0; j < ELEMENTSOF(dmi_vendor_table); j++){
+                        if ( (strcmp(s, dmi_vendor_table[j].vendor) == 0) )
+                                return 1;
+		}
+        }
+
+	return 0;
+#endif
+
+}
+
+int cpuid_check(){
+
+        /* CPUID is an x86 specific interface. */
+	#if defined(__i386__) || defined(__x86_64__)
+
+        static const struct {
+                const char *cpuid;
+                int id;
+        } cpuid_vendor_table[] = {
+                { "XenVMMXenVMM", VIRTUALIZATION_XEN       },
+                { "KVMKVMKVM",    VIRTUALIZATION_KVM       },
+                { "VMwareVMware", VIRTUALIZATION_VMWARE    },
+                { "Microsoft Hv", VIRTUALIZATION_MICROSOFT },
+        };
+
+	uint32_t eax, ecx;
+	bool hypervisor;	//int works as well here
+
+	#if defined (__i386__)
+	#define REG_a "eax"
+	#define REG_b "ebx"
+	#elif defined (__amd64__)
+	#define REG_a "rax"
+	#define REG_b "rbx"
+	#endif
+
+	eax = 1;
+	__asm__ __volatile__ (
+		"  push %%"REG_b"         \n\t"
+		"  cpuid                  \n\t"
+		"  pop %%"REG_b"          \n\t"
+		: "=a" (eax), "=c" (ecx)
+		: "0" (eax)
+	);
+
+	hypervisor = !!(ecx & 0x80000000U);
+
+        if (hypervisor) {
+                union {
+                        uint32_t sig32[3];
+                        char text[13];
+                } sig = {};
+                unsigned j;
+
+                /* There is a hypervisor, see what it is */
+                eax = 0x40000000U;
+                __asm__ __volatile__ (
+                        "  push %%"REG_b"         \n\t"
+                        "  cpuid                  \n\t"
+                        "  mov %%ebx, %1          \n\t"
+                        "  pop %%"REG_b"          \n\t"
+                        : "=a" (eax), "=r" (sig.sig32[0]), 
+			  "=c" (sig.sig32[1]), "=d" (sig.sig32[2])
+                        : "0" (eax)
+                );
+                for (j = 0; j < ELEMENTSOF(cpuid_vendor_table); j++){
+                        if (strcmp(sig.text, cpuid_vendor_table[j].cpuid) == 0){
+				printf("No running in ");
+				if (strcmp("XenVMMXenVMM", cpuid_vendor_table[j].cpuid) == 0){
+					printf("Xen Hypervisor allowed!\n");
+				}
+				else if (strcmp("KVMKVMKVM", cpuid_vendor_table[j].cpuid) == 0){
+					printf("KVM allowed!\n");
+				}
+				else if (strcmp("VMwareVMware", cpuid_vendor_table[j].cpuid) == 0){
+					printf("VMWare allowed!\n");
+				}
+				else if (strcmp("Microsoft Hv", cpuid_vendor_table[j].cpuid) == 0){
+					printf("Microsoft Hypervisor allowed!\n");
+				}
+                                return 1;
+			}
+		}
+                return 1;
+        }
+#endif
+
+        return 0;
+}
+
+int detect_virtualization(){
+
+	/* The folks over at systemd recommend searching DMI strings first because
+	some virtualization technologies use the KVM hypervisor but are expected
+	to be detected as something else. An example is VBox 5.0+ which uses KVM 
+	as a backend. Fortunately for us, we actually don't care WHICH type of
+	hypervisor or virtualization techniques are running, we only care to know
+	if they are running at all. This is why we can check cpuid first. CPUID is
+	also more reliable in the sense of speed/accuracy. The only downside to it
+	is that it doesn't pick up some virtualization techniques because not all
+	virtual machines or hypervisors set the hypervisor present bit (namely VBox). */
+
+	if (   ( 
+		 cpuid_check()        ||
+		 dmi_check()          ||
+		 detect_vm_xen()      ||
+		 detect_vm_uml()      ||
+		 detect_vm_zvm()      ||
+		 detect_chroot()
+	   )==1)
+		return 1;
+	
+	else return 0;
+}
+
+int main(){
+	int ret = detect_virtualization();
+	printf("Ret is %d\n", ret);
+	return 0;
+}
+
+/******************************************************************/
+
+/******************************************************************
+**								 **
+**			   VMWARE DETECTION		         **
+**								 **
+**		This is entirely VMWare Specific code.	         **
+**								 **
+*******************************************************************
+
+This code is a very slightly modified version of the code found here:
+http://kb.vmware.com/selfservice/microsites/search.do?language=en_US&cmd=displayKC&externalId=1009458
+
+It works entirely the same and has been completed for your convenience.
+Make sure to include standard, input/output, and string libraries.
+
+
+
+#define VMWARE_HYPERVISOR_MAGIC 	0x564D5868
+#define VMWARE_HYPERVISOR_PORT  	0x5658
+#define VMWARE_PORT_CMD_GETVERSION      10
+#define UINT_MAX 			0xFFFFFFFF
+
+#define VMWARE_PORT(	eax, ebx, ecx, edx, a, b, c, d 				\
+		   ){ 								\
+			__asm__("inl %%dx" 					\
+				:"=a"(*eax), "=b"(*ebx), "=c"(*ecx), "=d"(*edx) \
+				:"0"(a), "1"(b), "2"(c), "3"(d) ); 		\
+		    }
+
+void GET_BIOS_SERIAL(char *string){
+	FILE *vendor;
+	vendor = fopen("/sys/class/dmi/id/sys_vendor", "r");
+	fscanf(vendor, "%s", string);
+	fclose(vendor);
+}
+
+int dmi_check(void){
+        char string[10];
+        GET_BIOS_SERIAL(string);
+
+        if (!memcmp(string, "VMware", 7) || !memcmp(string, "VMW", 3) || !memcmp(string, "VMw", 3))
+                return 1;                       // DMI contains VMware specific string.
+        else
+                return 0;
+}
+
+int hypervisor_port_check(){
+        unsigned int eax, ebx, ecx, edx;
+	VMWARE_PORT(&eax, &ebx, &ecx, &edx, VMWARE_HYPERVISOR_MAGIC, UINT_MAX, VMWARE_PORT_CMD_GETVERSION, VMWARE_HYPERVISOR_PORT);
+	if (ebx == VMWARE_HYPERVISOR_MAGIC) { return 1; } else { return 0; }
+}
+
+void cpuid(int a, unsigned int *eax, unsigned int *ebx, unsigned int *ecx, unsigned int *edx){
+
+	__asm__("cpuid" :"=a"(*eax), "=b"(*ebx), "=c"(*ecx), "=d"(*edx) :"0"(a));
+
+}
+
+int cpuid_check(){
+
+        unsigned int eax, ebx, ecx, edx;
+        char hyper_vendor_id[13];
+
+	cpuid(0x1, &eax, &ebx, &ecx, &edx);
+	if ((ecx) & (1<<(31))){
+		cpuid(0x40000000, &eax, &ebx, &ecx, &edx);
+                memcpy(hyper_vendor_id + 0, &ebx, 4);
+                memcpy(hyper_vendor_id + 4, &ecx, 4);
+                memcpy(hyper_vendor_id + 8, &edx, 4);
+                hyper_vendor_id[12] = '\0';
+                if (!strcmp(hyper_vendor_id, "VMwareVMware"))
+                        return 1;
+        }
+
+	return 0;
+
+}
+
+int Detect_VMware(){
+	if (cpuid_check())
+		return 1;		// Success running under VMware.
+        else if (dmi_check() && hypervisor_port_check())
+                return 1;
+	return 0;
+
+}
+
+int main(){
+	int ret = Detect_VMware();
+	if ( ret == 0 ){
+		printf("All clear!\n");
+	} else { printf("Running under VMWare\n"); }
+}
+
+******************************************************************/
+[/code]
