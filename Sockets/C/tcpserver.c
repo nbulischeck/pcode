@@ -74,7 +74,8 @@ int main(int argc, char **argv){
 		if (memcmp("exit", buffer, 4) == 0)
 			break;
 		strncpy(hold, buffer, read), hold[read] = 0;
-		printf("%s", hold);
+		printf("Received: %s", hold);
+		send(cfd, hold, read+1, 0);
 	}
 
 	return 0;

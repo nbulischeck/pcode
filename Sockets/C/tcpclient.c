@@ -68,6 +68,10 @@ int main(int argc, char **argv){
     	send(sfd, buffer, bytes_read, 0);
 		if (memcmp("exit", buffer, 4) == 0)
 			break;
+		bytes_read = recv(sfd, buffer, BUFFSIZE, 0);
+		buffer[bytes_read] = 0;
+		printf("%s", buffer);
+		memset(buffer, 0, BUFFSIZE);
 	}
 
     close(sfd);

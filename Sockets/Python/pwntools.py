@@ -8,5 +8,6 @@ IP="127.0.0.1"
 PORT=3000
 
 r = remote(IP, PORT)
-r.sendline("Hello")
+r.send("Hello")
+print r.recv()
 r.close()
