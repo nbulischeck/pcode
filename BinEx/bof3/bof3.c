@@ -135,3 +135,18 @@ int main(int argc, char **argv){
     printf("%p\n", buffer);
     gets(buffer);
 }
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
